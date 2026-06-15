@@ -1,11 +1,33 @@
-import { useState, useEffect, useCallback } from "react";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AUTOPARTS HAÏTI — Frontend v2 (connecté au backend cloud)
-// ─────────────────────────────────────────────────────────────────────────────
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const API = import.meta.env.VITE_API_URL || "https://ton-app.railway.app";
 
+// ── SUPABASE STORAGE ──────────────────────────────────────────────────────────
+const SB_URL = "https://qbomcjfbsuatunlhdprr.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFib21jamZic3VhdHVubGhkcHJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE0ODg5NDAsImV4cCI6MjA5NzA2NDk0MH0.RJCJr7VZPrhBQsK2zZyz4l4n_HOBdKYeYnxWXRYZNfY";
+const BUCKET = "image piece";
+
+async function uploadPhoto(file, ref) {
+  const ext = file.name.split(".").pop();
+  const path = `${ref}/${Date.now()}.${ext}`;
+  const res = await fetch(`${SB_URL}/storage/v1/object/${encodeURIComponent(BUCKET)}/${path}`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${SB_KEY}`, "Content-Type": file.type, "x-upsert": "true" },
+    body: file,
+  });
+  if (!res.ok) throw new Error("Erreur upload");
+  return `${SB_URL}/storage/v1/object/public/${encodeURIComponent(BUCKET)}/${path}`;
+}
+
+async function deletePhoto(url) {
+  const path = url.split(`/object/public/${encodeURIComponent(BUCKET)}/`)[1];
+  if (!path) return;
+  await fetch(`${SB_URL}/storage/v1/object/${encodeURIComponent(BUCKET)}/${path}`, {
+    method: "DELETE", headers: { "Authorization": `Bearer ${SB_KEY}` },
+  });
+}
+
+// ── DESIGN ────────────────────────────────────────────────────────────────────
 const T = {
   bg:"#0F1117",surface:"#1A1D27",card:"#22263A",border:"#2E3350",
   amber:"#F5A623",amberDim:"#7A5312",green:"#2ECC71",greenDim:"#1A5C3A",
@@ -27,23 +49,15 @@ const css = `
 async function api(path, method = "GET", body = null, token = null) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`${API}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : null,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.erreur || `Erreur ${res.status}`);
-  }
+  const res = await fetch(`${API}${path}`, { method, headers, body: body ? JSON.stringify(body) : null });
+  if (!res.ok) { const err = await res.json().catch(()=>({})); throw new Error(err.erreur || `Erreur ${res.status}`); }
   return res.json();
 }
 
 // ── OFFLINE QUEUE ─────────────────────────────────────────────────────────────
-// Stocke les ventes faites sans internet et les synchronise au retour
 const QUEUE_KEY = "autoparts_offline_queue";
-function getQueue() { try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); } catch { return []; } }
-function addToQueue(item) { const q = getQueue(); q.push(item); localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); }
+function getQueue() { try { return JSON.parse(localStorage.getItem(QUEUE_KEY)||"[]"); } catch { return []; } }
+function addToQueue(item) { const q=getQueue(); q.push(item); localStorage.setItem(QUEUE_KEY,JSON.stringify(q)); }
 function clearQueue() { localStorage.removeItem(QUEUE_KEY); }
 
 // ── UTILS ─────────────────────────────────────────────────────────────────────
@@ -51,7 +65,7 @@ const genId  = p => p + Date.now().toString(36).toUpperCase();
 const today  = () => new Date().toISOString().split("T")[0];
 const dateHT = d => new Date(d).toLocaleDateString("fr-FR",{day:"2-digit",month:"short",year:"numeric"});
 const fmt    = n => new Intl.NumberFormat("fr-HT").format(Math.round(n)) + " HTG";
-const fmtUSD = (n,t) => "$" + (n / t).toFixed(2);
+const fmtUSD = (n,t) => "$" + (n/t).toFixed(2);
 
 // ── BASE COMPONENTS ───────────────────────────────────────────────────────────
 const Badge = ({color,children}) => (
@@ -100,17 +114,42 @@ const PageHeader = ({label,title,action}) => (
     {action}
   </div>
 );
-
-// ── LOADING / ERROR ───────────────────────────────────────────────────────────
 const Spinner = () => <div style={{textAlign:"center",padding:40,color:T.muted}}>Chargement…</div>;
 const ErrMsg  = ({msg}) => <div style={{color:T.red,padding:12,background:T.redDim+"33",borderRadius:6,fontSize:13}}>{msg}</div>;
-
-// ── OFFLINE BANNER ────────────────────────────────────────────────────────────
 const OfflineBanner = ({isOffline,queueLen}) => !isOffline ? null : (
   <div style={{background:T.amberDim,borderBottom:`1px solid ${T.amber}`,padding:"8px 16px",textAlign:"center",fontSize:12,color:T.amber}}>
     ⚠ Mode hors-ligne — {queueLen>0?`${queueLen} vente${queueLen>1?"s":""} en attente de synchronisation`:"Les ventes seront synchronisées au retour d'internet"}
   </div>
 );
+
+// ── PHOTO GALLERY COMPONENT ───────────────────────────────────────────────────
+function PhotoGallery({photos,onRemove,uploading,onAdd,fileRef}) {
+  return (
+    <div style={{background:T.surface,borderRadius:8,padding:12}}>
+      <div style={{fontSize:12,color:T.muted,fontWeight:600,marginBottom:8}}>📷 PHOTOS DE LA PIÈCE ({photos.length}/5)</div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:10}}>
+        {photos.map((url,i)=>(
+          <div key={i} style={{position:"relative",width:80,height:80}}>
+            <img src={url} alt={`Photo ${i+1}`} style={{width:80,height:80,objectFit:"cover",borderRadius:6,border:`1px solid ${T.border}`}}/>
+            {onRemove&&(
+              <button onClick={()=>onRemove(url)} style={{position:"absolute",top:-6,right:-6,width:20,height:20,borderRadius:"50%",background:T.red,border:"none",color:"white",fontSize:12,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700}}>×</button>
+            )}
+          </div>
+        ))}
+        {photos.length===0&&<div style={{color:T.muted,fontSize:12,padding:"10px 0"}}>Aucune photo ajoutée</div>}
+      </div>
+      {onAdd&&photos.length<5&&(
+        <>
+          <input ref={fileRef} type="file" accept="image/*" multiple onChange={onAdd} style={{display:"none"}}/>
+          <Btn small outline onClick={()=>fileRef.current?.click()} color={T.blue} disabled={uploading}>
+            {uploading?"Téléchargement…":"📷 Ajouter des photos"}
+          </Btn>
+          <div style={{fontSize:10,color:T.muted,marginTop:4}}>Max 5 photos · Prendre en photo ou choisir depuis la galerie</div>
+        </>
+      )}
+    </div>
+  );
+}
 
 // ── TAUX WIDGET ───────────────────────────────────────────────────────────────
 function TauxWidget({taux,setTaux,token}) {
@@ -193,6 +232,7 @@ function Dashboard({token,taux,pieces,ventes,demandes,commandes}) {
           {[...ruptures,...stockBas].map(p=>(
             <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:T.surface,borderRadius:6,marginBottom:6}}>
               <div>
+                {(p.photos||[]).length>0&&<img src={p.photos[0]} alt="" style={{width:40,height:40,objectFit:"cover",borderRadius:4,marginBottom:4,display:"block"}}/>}
                 <span className="mono" style={{fontSize:11,color:T.muted}}>{p.ref}</span>
                 <div style={{fontWeight:600,fontSize:14}}>{p.nom}</div>
                 <div style={{fontSize:11,color:T.muted}}>📍 {p.localisation}</div>
@@ -211,6 +251,7 @@ function Dashboard({token,taux,pieces,ventes,demandes,commandes}) {
           {top5.map((p,i)=>(
             <div key={p.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 0",borderBottom:i<4?`1px solid ${T.border}`:"none"}}>
               <div style={{width:24,height:24,borderRadius:"50%",background:i===0?T.amber+"33":T.surface,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:700,color:i===0?T.amber:T.muted}}>{i+1}</div>
+              {(p.photos||[]).length>0&&<img src={p.photos[0]} alt="" style={{width:32,height:32,objectFit:"cover",borderRadius:4}}/>}
               <div style={{flex:1}}><div style={{fontSize:13,fontWeight:600}}>{p.nom}</div><div style={{fontSize:11,color:T.muted}}>{p.marque}</div></div>
               <div style={{textAlign:"right"}}><div style={{fontWeight:700,color:T.green}}>{p.vendu}</div><div style={{fontSize:10,color:T.muted}}>vendus</div></div>
             </div>
@@ -244,6 +285,10 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
   const [form,setForm]=useState({});
   const [saving,setSaving]=useState(false);
   const [err,setErr]=useState("");
+  const [photos,setPhotos]=useState([]);
+  const [uploading,setUploading]=useState(false);
+  const [viewPhoto,setViewPhoto]=useState(null);
+  const fileRef=useRef();
 
   const filtered=pieces.filter(p=>{
     const q=search.toLowerCase();
@@ -255,19 +300,37 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
 
   const blank=()=>({ref:"",nom:"",marque:"",categorie:"Filtration",qte:"",qte_min:"",prix_achat:"",prix_vente:"",zone:"A",etagere:"01",niveau:"1",position:"A",vehicules:"",fournisseur_id:""});
 
-  const toApiBody=f=>({ref:f.ref,nom:f.nom,marque:f.marque,categorie:f.categorie,qte:+f.qte,qte_min:+f.qte_min,prix_achat:+f.prix_achat,prix_vente:+f.prix_vente,localisation:`${f.zone}-${f.etagere}-${f.niveau}-${f.position}`,vehicules:f.vehicules.split("\n").map(s=>s.trim()).filter(Boolean),fournisseur_id:f.fournisseur_id||null});
+  const toApiBody=f=>({ref:f.ref,nom:f.nom,marque:f.marque,categorie:f.categorie,qte:+f.qte,qte_min:+f.qte_min,prix_achat:+f.prix_achat,prix_vente:+f.prix_vente,localisation:`${f.zone}-${f.etagere}-${f.niveau}-${f.position}`,vehicules:f.vehicules.split("\n").map(s=>s.trim()).filter(Boolean),fournisseur_id:f.fournisseur_id||null,photos});
+
+  const handlePhotoSelect=async(e)=>{
+    const files=Array.from(e.target.files);
+    if(!form.ref){setErr("Entrez d'abord la référence avant d'ajouter des photos.");return;}
+    if(photos.length+files.length>5){setErr("Maximum 5 photos par pièce.");return;}
+    setUploading(true);setErr("");
+    try{
+      const urls=await Promise.all(files.map(f=>uploadPhoto(f,form.ref||"piece")));
+      setPhotos(prev=>[...prev,...urls]);
+    }catch(e){setErr("Erreur upload: "+e.message);}
+    setUploading(false);
+    e.target.value="";
+  };
+
+  const removePhoto=async(url)=>{
+    try{await deletePhoto(url);}catch{}
+    setPhotos(prev=>prev.filter(u=>u!==url));
+  };
 
   const save=async()=>{
     setSaving(true);setErr("");
     try{
       if(modal==="add"){
         const p=await api("/api/pieces","POST",toApiBody(form),token);
-        setPieces(prev=>[...prev,p]);
+        setPieces(prev=>[...prev,{...p,photos}]);
       } else {
         const p=await api(`/api/pieces/${form.id}`,"PUT",toApiBody(form),token);
-        setPieces(prev=>prev.map(x=>x.id===form.id?p:x));
+        setPieces(prev=>prev.map(x=>x.id===form.id?{...p,photos}:x));
       }
-      setModal(null);
+      setModal(null);setPhotos([]);setForm({});
     }catch(e){setErr(e.message);}
     setSaving(false);
   };
@@ -275,10 +338,11 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
   const openEdit=p=>{
     const [zone="A",etagere="01",niveau="1",position="A"]=(p.localisation||"").split("-");
     setForm({...p,zone,etagere,niveau,position,vehicules:(p.vehicules||[]).join("\n"),fournisseur_id:p.fournisseur_id||""});
+    setPhotos(p.photos||[]);
     setModal("edit");
   };
 
-  const marge=form.prix_achat&&form.prix_vente?form.prix_vente-form.prix_achat:0;
+  const marge=form.prix_achat&&form.prix_vente?+form.prix_vente - +form.prix_achat:0;
   const fournOptions=[{value:"",label:"— Aucun —"},...fournisseurs.map(f=>({value:f.id,label:f.nom}))];
 
   const PieceForm=()=>(
@@ -301,7 +365,7 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
         <div style={{flex:1}}><Input label="PRIX ACHAT (HTG)" type="number" value={form.prix_achat||""} onChange={v=>setForm(f=>({...f,prix_achat:v}))}/></div>
         <div style={{flex:1}}><Input label="PRIX VENTE (HTG)" type="number" value={form.prix_vente||""} onChange={v=>setForm(f=>({...f,prix_vente:v}))}/></div>
       </div>
-      {marge>0&&<div style={{background:T.surface,borderRadius:6,padding:"8px 12px",fontSize:12}}>Marge : <span style={{color:T.green,fontWeight:700}}>{fmt(marge)}</span> · {fmtUSD(marge,taux)} ({Math.round(marge/form.prix_vente*100)}%)</div>}
+      {marge>0&&<div style={{background:T.surface,borderRadius:6,padding:"8px 12px",fontSize:12}}>Marge : <span style={{color:T.green,fontWeight:700}}>{fmt(marge)}</span> · {fmtUSD(marge,taux)} ({Math.round(marge/+form.prix_vente*100)}%)</div>}
       <div style={{background:T.surface,borderRadius:8,padding:12}}>
         <div style={{fontSize:12,color:T.muted,fontWeight:600,marginBottom:8}}>📍 LOCALISATION</div>
         <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -318,8 +382,9 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
           placeholder={"Toyota Corolla 2010-2018\nToyota Camry 2012-2020"}
           style={{background:T.surface,border:`1px solid ${T.border}`,borderRadius:6,padding:"9px 12px",color:T.text,fontSize:13,resize:"vertical"}}/>
       </div>
+      <PhotoGallery photos={photos} onRemove={removePhoto} uploading={uploading} onAdd={handlePhotoSelect} fileRef={fileRef}/>
       <div style={{display:"flex",gap:10,justifyContent:"flex-end",paddingTop:4}}>
-        <Btn outline onClick={()=>setModal(null)}>Annuler</Btn>
+        <Btn outline onClick={()=>{setModal(null);setPhotos([]);setForm({});}}>Annuler</Btn>
         <Btn onClick={save} disabled={saving}>{saving?"Enregistrement…":modal==="edit"?"Enregistrer":"Ajouter la pièce"}</Btn>
       </div>
     </div>
@@ -327,7 +392,7 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
-      <PageHeader label="INVENTAIRE" title={`${pieces.length} références · ${filtered.length} affichées`} action={<Btn onClick={()=>{setForm(blank());setModal("add");}}>+ Nouvelle pièce</Btn>}/>
+      <PageHeader label="INVENTAIRE" title={`${pieces.length} références · ${filtered.length} affichées`} action={<Btn onClick={()=>{setForm(blank());setPhotos([]);setModal("add");}}>+ Nouvelle pièce</Btn>}/>
       <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="🔍  Chercher pièce, ref, véhicule, emplacement..."
           style={{flex:1,minWidth:200,background:T.surface,border:`1px solid ${T.border}`,borderRadius:6,padding:"9px 14px",color:T.text,fontSize:14,outline:"none"}}/>
@@ -343,6 +408,14 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
         {filtered.map(p=>(
           <Card key={p.id} style={{cursor:"pointer"}} onClick={()=>openEdit(p)}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12}}>
+              {/* Photo miniature */}
+              {(p.photos||[]).length>0&&(
+                <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                  <img src={p.photos[0]} alt={p.nom} onClick={e=>{e.stopPropagation();setViewPhoto(p.photos);}}
+                    style={{width:64,height:64,objectFit:"cover",borderRadius:6,border:`1px solid ${T.border}`,cursor:"zoom-in"}}/>
+                  {p.photos.length>1&&<div style={{fontSize:10,color:T.muted,textAlign:"center"}}>+{p.photos.length-1}</div>}
+                </div>
+              )}
               <div style={{flex:1}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4,flexWrap:"wrap"}}>
                   <span className="mono" style={{fontSize:11,color:T.amber,fontWeight:600}}>{p.ref}</span>
@@ -366,7 +439,18 @@ function Inventaire({token,taux,pieces,setPieces,fournisseurs}) {
           </Card>
         ))}
       </div>
-      {modal&&<Modal title={modal==="edit"?"Modifier la pièce":"Ajouter une pièce"} onClose={()=>setModal(null)}><PieceForm/></Modal>}
+      {modal&&<Modal title={modal==="edit"?"Modifier la pièce":"Ajouter une pièce"} onClose={()=>{setModal(null);setPhotos([]);setForm({});}}><PieceForm/></Modal>}
+      {/* Visionneuse de photos */}
+      {viewPhoto&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.92)",zIndex:2000,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20}} onClick={()=>setViewPhoto(null)}>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap",justifyContent:"center"}}>
+            {viewPhoto.map((url,i)=>(
+              <img key={i} src={url} alt={`Photo ${i+1}`} style={{maxWidth:300,maxHeight:300,objectFit:"contain",borderRadius:8,border:`2px solid ${T.amber}`}}/>
+            ))}
+          </div>
+          <div style={{color:T.muted,fontSize:12,marginTop:16}}>Cliquer pour fermer</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -383,7 +467,7 @@ function NouvelleVente({token,taux,pieces,setPieces,ventes,setVentes,employe,isO
   const [saving,setSaving]=useState(false);
 
   const results=search.length>1?pieces.filter(p=>[p.nom,p.ref,...(p.vehicules||[])].join(" ").toLowerCase().includes(search.toLowerCase())&&p.qte>0).slice(0,5):[];
-  const addToPanier=p=>{setPanier(prev=>{const ex=prev.find(x=>x.ref===p.ref);if(ex)return prev.map(x=>x.ref===p.ref?{...x,qty:x.qty+1,total:(x.qty+1)*x.pu}:x);return [...prev,{ref:p.ref,nom:p.nom,qty:1,pu:+p.prix_vente,total:+p.prix_vente}];});setSearch("");};
+  const addToPanier=p=>{setPanier(prev=>{const ex=prev.find(x=>x.ref===p.ref);if(ex)return prev.map(x=>x.ref===p.ref?{...x,qty:x.qty+1,total:(x.qty+1)*x.pu}:x);return [...prev,{ref:p.ref,nom:p.nom,qty:1,pu:+p.prix_vente,total:+p.prix_vente,photo:(p.photos||[])[0]||null}];});setSearch("");};
   const removeFromPanier=ref=>setPanier(prev=>prev.filter(x=>x.ref!==ref));
   const updateQty=(ref,qty)=>setPanier(prev=>prev.map(x=>x.ref===ref?{...x,qty:+qty,total:+qty*x.pu}:x));
   const sousTotal=panier.reduce((s,x)=>s+x.total,0);
@@ -395,13 +479,8 @@ function NouvelleVente({token,taux,pieces,setPieces,ventes,setVentes,employe,isO
     const body={client:client||"Client anonyme",telephone:tel,vehicule:vehicule||"—",pieces:panier,sous_total:sousTotal,recu:+recu||sousTotal,monnaie:monnaie>0?monnaie:0};
     try{
       let v;
-      if(isOffline){
-        v={id:genId("V"),date:today(),...body,employe_nom:employe};
-        addToQueue({endpoint:"/api/ventes",method:"POST",body});
-      } else {
-        v=await api("/api/ventes","POST",body,token);
-        v.pieces=panier;
-      }
+      if(isOffline){v={id:genId("V"),date:today(),...body,employe_nom:employe};addToQueue({endpoint:"/api/ventes",method:"POST",body});}
+      else{v=await api("/api/ventes","POST",body,token);v.pieces=panier;}
       setVentes(prev=>[v,...prev]);
       setPieces(prev=>prev.map(p=>{const item=panier.find(x=>x.ref===p.ref);return item?{...p,qte:p.qte-item.qty,vendu:p.vendu+item.qty}:p;}));
       setFacture({...v,employe_nom:employe});
@@ -434,11 +513,17 @@ function NouvelleVente({token,taux,pieces,setPieces,ventes,setVentes,employe,isO
               {results.length>0&&(
                 <div style={{position:"absolute",top:"100%",left:0,right:0,background:T.card,border:`1px solid ${T.border}`,borderRadius:6,zIndex:100,overflow:"hidden"}}>
                   {results.map(p=>(
-                    <div key={p.id} onClick={()=>addToPanier(p)} style={{padding:"10px 14px",cursor:"pointer",borderBottom:`1px solid ${T.border}`}}
+                    <div key={p.id} onClick={()=>addToPanier(p)} style={{padding:"10px 14px",cursor:"pointer",borderBottom:`1px solid ${T.border}`,display:"flex",gap:10,alignItems:"center"}}
                       onMouseEnter={e=>e.currentTarget.style.background=T.surface} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                      <div style={{display:"flex",justifyContent:"space-between"}}>
-                        <div><span className="mono" style={{fontSize:11,color:T.amber}}>{p.ref}</span><div style={{fontWeight:600,fontSize:13}}>{p.nom}</div><div style={{fontSize:11,color:T.muted}}>📍 {p.localisation} · Qté: {p.qte}</div></div>
-                        <div style={{textAlign:"right"}}><div style={{fontWeight:700,color:T.green,fontSize:13}}>{fmt(p.prix_vente)}</div><div style={{fontSize:11,color:T.muted}}>{fmtUSD(p.prix_vente,taux)}</div></div>
+                      {(p.photos||[]).length>0&&<img src={p.photos[0]} alt="" style={{width:36,height:36,objectFit:"cover",borderRadius:4}}/>}
+                      <div style={{flex:1}}>
+                        <span className="mono" style={{fontSize:11,color:T.amber}}>{p.ref}</span>
+                        <div style={{fontWeight:600,fontSize:13}}>{p.nom}</div>
+                        <div style={{fontSize:11,color:T.muted}}>📍 {p.localisation} · Qté: {p.qte}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontWeight:700,color:T.green,fontSize:13}}>{fmt(p.prix_vente)}</div>
+                        <div style={{fontSize:11,color:T.muted}}>{fmtUSD(p.prix_vente,taux)}</div>
                       </div>
                     </div>
                   ))}
@@ -454,7 +539,10 @@ function NouvelleVente({token,taux,pieces,setPieces,ventes,setVentes,employe,isO
             {panier.map(x=>(
               <div key={x.ref} style={{padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
-                  <div style={{fontSize:13,fontWeight:600}}>{x.nom}</div>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    {x.photo&&<img src={x.photo} alt="" style={{width:32,height:32,objectFit:"cover",borderRadius:4}}/>}
+                    <div style={{fontSize:13,fontWeight:600}}>{x.nom}</div>
+                  </div>
                   <button onClick={()=>removeFromPanier(x.ref)} style={{background:"none",border:"none",color:T.red,cursor:"pointer",fontSize:16}}>×</button>
                 </div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -463,7 +551,10 @@ function NouvelleVente({token,taux,pieces,setPieces,ventes,setVentes,employe,isO
                     <span style={{fontSize:13,fontWeight:600,width:24,textAlign:"center"}}>{x.qty}</span>
                     <button onClick={()=>updateQty(x.ref,x.qty+1)} style={{width:24,height:24,borderRadius:4,background:T.surface,border:`1px solid ${T.border}`,color:T.text,cursor:"pointer"}}>+</button>
                   </div>
-                  <div style={{textAlign:"right"}}><div style={{fontSize:13,fontWeight:700,color:T.green}}>{fmt(x.total)}</div><div style={{fontSize:11,color:T.muted}}>{fmtUSD(x.total,taux)}</div></div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:13,fontWeight:700,color:T.green}}>{fmt(x.total)}</div>
+                    <div style={{fontSize:11,color:T.muted}}>{fmtUSD(x.total,taux)}</div>
+                  </div>
                 </div>
               </div>
             ))}
@@ -671,7 +762,7 @@ function BonsCommande({token,taux,commandes,setCommandes,fournisseurs,pieces}) {
   const envoyerWA=bc=>{
     const f=fournisseurs.find(x=>x.id===bc.fournisseur_id);
     if(!f?.whatsapp)return alert("Numéro WhatsApp non renseigné.");
-    const lignes=(bc.lignes||[]).map(l=>`• ${l.nom} (${l.ref}) — Qté: ${l.qty} — PU: ${l.pu?.toLocaleString()||l.prix_unitaire?.toLocaleString()} HTG`).join("\n");
+    const lignes=(bc.lignes||[]).map(l=>`• ${l.nom} (${l.ref}) — Qté: ${l.qty} — PU: ${(l.pu||l.prix_unitaire||0).toLocaleString()} HTG`).join("\n");
     const msg=`*BON DE COMMANDE #${bc.id}*\nDate: ${dateHT(bc.created_at)}\nFournisseur: ${f.nom}\n\n${lignes}\n\n*TOTAL: ${bc.total?.toLocaleString()} HTG*\n${bc.note?`\nNote: ${bc.note}`:""}`;
     window.open(`https://wa.me/${f.whatsapp}?text=${encodeURIComponent(msg)}`);
   };
@@ -709,7 +800,10 @@ function BonsCommande({token,taux,commandes,setCommandes,fournisseurs,pieces}) {
               <input value={searchP} onChange={e=>setSearchP(e.target.value)} placeholder="🔍  Chercher une pièce..."
                 style={{width:"100%",background:T.card,border:`1px solid ${T.border}`,borderRadius:6,padding:"9px 12px",color:T.text,fontSize:13,outline:"none"}}/>
               {pRes.length>0&&<div style={{position:"absolute",top:"100%",left:0,right:0,background:T.card,border:`1px solid ${T.border}`,borderRadius:6,zIndex:100}}>
-                {pRes.map(p=><div key={p.id} onClick={()=>{addL(p);setSearchP("");}} style={{padding:"8px 12px",cursor:"pointer",borderBottom:`1px solid ${T.border}`,fontSize:13}} onMouseEnter={e=>e.currentTarget.style.background=T.surface} onMouseLeave={e=>e.currentTarget.style.background="transparent"}><span className="mono" style={{color:T.amber,fontSize:11}}>{p.ref}</span> {p.nom} <span style={{float:"right",color:T.muted}}>Achat: {fmt(p.prix_achat)}</span></div>)}
+                {pRes.map(p=><div key={p.id} onClick={()=>{addL(p);setSearchP("");}} style={{padding:"8px 12px",cursor:"pointer",borderBottom:`1px solid ${T.border}`,fontSize:13,display:"flex",gap:8,alignItems:"center"}} onMouseEnter={e=>e.currentTarget.style.background=T.surface} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  {(p.photos||[]).length>0&&<img src={p.photos[0]} alt="" style={{width:28,height:28,objectFit:"cover",borderRadius:4}}/>}
+                  <span className="mono" style={{color:T.amber,fontSize:11}}>{p.ref}</span> {p.nom} <span style={{float:"right",color:T.muted}}>Achat: {fmt(p.prix_achat)}</span>
+                </div>)}
               </div>}
             </div>
           </div>
@@ -756,8 +850,11 @@ function Rapports({ventes,pieces,taux}) {
         <div style={{fontWeight:700,marginBottom:12}}>📦 Pièces sans aucune vente ({stockMort.length})</div>
         {stockMort.length===0&&<div style={{color:T.muted,fontSize:13}}>Excellent ! Toutes les pièces ont été vendues au moins une fois.</div>}
         {stockMort.map(p=>(
-          <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
-            <div><span className="mono" style={{fontSize:11,color:T.amber}}>{p.ref}</span><div style={{fontSize:13,fontWeight:600}}>{p.nom}</div><div style={{fontSize:11,color:T.muted}}>📍 {p.localisation}</div></div>
+          <div key={p.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${T.border}`}}>
+            <div style={{display:"flex",gap:10,alignItems:"center"}}>
+              {(p.photos||[]).length>0&&<img src={p.photos[0]} alt="" style={{width:36,height:36,objectFit:"cover",borderRadius:4}}/>}
+              <div><span className="mono" style={{fontSize:11,color:T.amber}}>{p.ref}</span><div style={{fontSize:13,fontWeight:600}}>{p.nom}</div><div style={{fontSize:11,color:T.muted}}>📍 {p.localisation}</div></div>
+            </div>
             <div style={{textAlign:"right"}}><div style={{fontSize:13}}>{p.qte} unités</div><div style={{fontSize:11,color:T.red}}>{fmt(p.qte*+p.prix_achat)} immobilisé</div></div>
           </div>
         ))}
@@ -855,34 +952,25 @@ export default function App() {
   const [employes,setEmployes]=useState([]);
   const [loading,setLoading]=useState(false);
 
-  // Online/Offline detection
   useEffect(()=>{
     const on=()=>{setIsOffline(false);syncQueue();};
     const off=()=>setIsOffline(true);
-    window.addEventListener("online",on);
-    window.addEventListener("offline",off);
+    window.addEventListener("online",on);window.addEventListener("offline",off);
     return()=>{window.removeEventListener("online",on);window.removeEventListener("offline",off);};
   },[token]);
 
-  // Sync offline queue
   const syncQueue=useCallback(async()=>{
     const q=getQueue();
     if(!q.length||!token) return;
-    for(const item of q){
-      try{await api(item.endpoint,item.method,item.body,token);}catch{}
-    }
+    for(const item of q){try{await api(item.endpoint,item.method,item.body,token);}catch{}}
     clearQueue();setQueueLen(0);
   },[token]);
 
-  // Auto-login from stored token
   useEffect(()=>{
     if(!token) return;
-    api("/api/auth/me","GET",null,token)
-      .then(u=>setUser(u))
-      .catch(()=>{localStorage.removeItem("ap_token");setToken(null);});
+    api("/api/auth/me","GET",null,token).then(u=>setUser(u)).catch(()=>{localStorage.removeItem("ap_token");setToken(null);});
   },[token]);
 
-  // Load all data
   useEffect(()=>{
     if(!user||!token) return;
     setLoading(true);
@@ -911,7 +999,6 @@ export default function App() {
       <style>{css}</style>
       <OfflineBanner isOffline={isOffline} queueLen={queueLen}/>
       <div style={{display:"flex",flexDirection:"column",minHeight:"100vh"}}>
-        {/* Header */}
         <div className="no-print" style={{background:T.surface,borderBottom:`1px solid ${T.border}`,padding:"10px 16px",position:"sticky",top:0,zIndex:50}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",maxWidth:900,margin:"0 auto",width:"100%"}}>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -926,7 +1013,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Content */}
         <div style={{flex:1,padding:16,maxWidth:900,width:"100%",margin:"0 auto"}}>
           {loading?<Spinner/>:<>
             {page==="dashboard"&&<Dashboard token={token} taux={taux} pieces={pieces} ventes={ventes} demandes={demandes} commandes={commandes}/>}
@@ -941,7 +1027,6 @@ export default function App() {
           </>}
         </div>
 
-        {/* Bottom Nav */}
         <div className="no-print" style={{background:T.surface,borderTop:`1px solid ${T.border}`,display:"flex",position:"sticky",bottom:0,overflowX:"auto"}}>
           {nav.map(n=>(
             <button key={n.id} onClick={()=>setPage(n.id)} style={{flex:1,minWidth:52,padding:"8px 4px",background:"none",border:"none",cursor:"pointer",color:page===n.id?T.amber:T.muted,borderTop:page===n.id?`2px solid ${T.amber}`:"2px solid transparent",display:"flex",flexDirection:"column",alignItems:"center",gap:2,transition:"color .15s"}}>
